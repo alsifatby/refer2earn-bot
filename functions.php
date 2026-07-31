@@ -1,72 +1,69 @@
-<?>
 <?php
 /**
  * Project: Enterprise Telegram Refer & Earn Bot
- * Core Functions Handler (`functions.php`)
+ * Core Functions (`functions.php`)
  */
 
 declare(strict_types=1);
 
-require_once __DIR__ . '/database.php';
-
-function apiRequest(string $method, array $parameters): mixed {
+// কনফিগ থেকে টোকেন নিয়ে টেলিগ্রাম এপিআইতে রিকোয়েস্ট পাঠানোর ফাংশন
+function sendTelegramRequest(string $method, array $data): mixed {
     $url = "https://api.telegram.org/bot" . BOT_TOKEN . "/" . $method;
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($parameters));
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
     
-    $response = curl_exec($ch);
-    if (curl_errno($ch)) {
-        error_log("Curl error in $method: " . curl_error($ch));
-        curl_close($ch);
+    $options = [
+        'http' => [
+            'header'  => "Content-Type: application/json\r\n",
+            'method'  => 'POST',
+            'content' => json_encode($data),
+            'timeout' => 30
+        ]
+    ];
+    
+    $context = stream_context_create($options);
+    $result = @file_get_contents($url, false, $context);
+    
+    if ($result === false) {
         return false;
     }
-    curl_close($ch);
-    return json_decode($response, true);
+    
+    return json_decode($result, true);
 }
 
-function sendMessage(int|string $chat_id, string $text, ?array $reply_markup = null, string $parse_mode = 'HTML'): mixed {
+// সাধারণ টেক্সট বা মেসেজ পাঠানোর ফাংশন
+function sendMessage(int|string $chat_id, string $text, array $keyboard = []): mixed {
     $data = [
         'chat_id' => $chat_id,
-        'text' => $text,
-        'parse_mode' => $parse_mode
-    ];
-    if ($reply_markup) {
-        $data['reply_markup'] = $reply_markup;
-    }
-    return apiRequest('sendMessage', $data);
-}
-
-function editMessageText(int|string $chat_id, int $message_id, string $text, ?array $reply_markup = null): mixed {
-    $data = [
-        'chat_id' => $chat_id,
-        'message_id' => $message_id,
         'text' => $text,
         'parse_mode' => 'HTML'
     ];
-    if ($reply_markup) {
-        $data['reply_markup'] = $reply_markup;
+    
+    if (!empty($keyboard)) {
+        if (isset($keyboard['inline_keyboard']) || isset($keyboard['keyboard'])) {
+            $data['reply_markup'] = json_encode($keyboard);
+        }
     }
-    return apiRequest('editMessageText', $data);
+    
+    return sendTelegramRequest('sendMessage', $data);
 }
 
-function answerCallbackQuery(string $callback_query_id, string $text = '', bool $show_alert = false): mixed {
-    return apiRequest('answerCallbackQuery', [
-        'callback_query_id' => $callback_query_id,
+// ইনলাইন বাটন ক্লিকের নোটিফিকেশন বন্ধ করার ফাংশন
+function answerCallbackQuery(string $callback_id, string $text = '', bool $alert = false): mixed {
+    $data = [
+        'callback_query_id' => $callback_id,
         'text' => $text,
-        'show_alert' => $show_alert
-    ]);
+        'show_alert' => $alert
+    ];
+    
+    return sendTelegramRequest('answerCallbackQuery', $data);
 }
 
+// ইউজার অ্যাডমিন কি না তা চেক করার ফাংশন
 function isAdmin(int|string $user_id): bool {
-    return in_array((int)$user_id, ADMIN_IDS, true);
+    $admins = [123456789]; // এখানে আপনার টেলিগ্রাম আইডি বসাতে পারেন
+    return in_array((int)$user_id, $admins, true);
 }
 
+// সেটিংস ফেচ করার ডামি ফাংশন
 function getSetting(string $key): string {
-    $db = Database::getConnection();
-    $stmt = $db->prepare("SELECT setting_value FROM settings WHERE setting_key = ?");
-    $stmt->execute([$key]);
-    return $stmt->fetchColumn() ?: '';
+    return '0'; // ডিফল্ট মেইনটেনেন্স অফ রাখা হলো
 }
