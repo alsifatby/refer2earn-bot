@@ -1,94 +1,136 @@
 <?php
-error_reporting(E_ALL);
-ini_set('display_errors', 1);
+/**
+ * Project: Enterprise Telegram Refer & Earn Bot
+ * Core Dispatcher / Webhook Entry (`index.php`)
+ */
 
-// আপনার টেলিগ্রাম বট টোকেন
-define('BOT_TOKEN', '8805535247:AAFZBrTqW0mDlT2IPQeDKPrMNnYEzflNZto'); 
+declare(strict_types=1);
 
-// আপনার Firebase Realtime Database URL
-define('FIREBASE_URL', 'https://refer2earn5-default-rtdb.asia-southeast1.firebasedatabase.app/');
+require_once __DIR__ . '/config.php';
+require_once __DIR__ . '/database.php';
+require_once __DIR__ . '/functions.php';
 
-// Telegram থেকে আসা ডাটা রিসিভ করা
 $content = file_get_contents("php://input");
 $update = json_decode($content, true);
 
-// যদি সরাসরি ব্রাউজার থেকে ভিজিট করা হয়
 if (!$update) {
-    echo "Refer2Earn Bot Server is Running & Connected to Firebase!";
+    echo "Enterprise Telegram Bot Webhook Active & Running Successfully.";
     exit;
 }
 
-// মেসেজ চেক করা
-if (isset($update['message'])) {
-    $chat_id = $update['message']['chat']['id'];
-    $text = isset($update['message']['text']) ? trim($update['message']['text']) : '';
-    $user_id = $update['message']['from']['id'];
-    $first_name = $update['message']['from']['first_name'] ?? 'User';
-    $username = $update['message']['from']['username'] ?? 'None';
-
-    // যদি কেউ /start লেখে
-    if ($text === '/start') {
-        // ফায়ারবেসে ইউজার ডাটা সেভ করার ডেটা প্রস্তুত করা
-        $userData = [
-            'user_id'       => $user_id,
-            'name'          => $first_name,
-            'username'      => $username,
-            'balance'       => 0.00,
-            'total_earned'  => 0.00,
-            'referrals'     => 0,
-            'joined_at'     => date('Y-m-d H:i:s')
-        ];
-
-        // Firebase-এ ডাটা সেভ করা (PUT মেথড ব্যবহার করে user_id দিয়ে ইউনিক রেকর্ড রাখা)
-        saveToFirebase("users/{$user_id}.json", $userData);
-
-        // ইউজারকে ওয়েলকাম মেসেজ পাঠানো
-        $reply = "স্বাগতম {$first_name}!\n\nRefer2Earn বটে আপনাকে স্বাগতম। আপনার অ্যাকাউন্ট সফলভাবে তৈরি হয়েছে।\n\nনিচের মেনু থেকে কাজ শুরু করুন:";
-        sendTelegramMessage($chat_id, $reply);
+// গ্লোবাল মেইনটেনেন্স মোড চেক
+if (getSetting('maintenance_mode') === '1') {
+    if (isset($update['message'])) {
+        $chat_id = $update['message']['chat']['id'];
+        $user_id = $update['message']['from']['id'];
+        if (!isAdmin($user_id)) {
+            sendMessage($chat_id, "⚠️ Bot is currently under maintenance. Please try again later.");
+            exit;
+        }
     }
 }
 
-/**
- * Firebase Realtime Database এ ডাটা পাঠানোর ফাংশন
- */
-function saveToFirebase($path, $data) {
-    $url = FIREBASE_URL . $path;
-    $jsonData = json_encode($data);
+// মেসেজ বা কমান্ড রাউটিং
+if (isset($update['message'])) {
+    $message = $update['message'];
+    $chat_id = $message['chat']['id'];
+    $user_id = $message['from']['id'];
+    $text = trim($message['text'] ?? '');
 
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, "PUT");
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $jsonData);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'Content-Type: application/json'
-    ]);
-    
-    $response = curl_exec($ch);
-    curl_close($ch);
-    
-    return $response;
+    $db = Database::getConnection();
+
+    if (str_starts_with($text, '/start')) {
+        require_once __DIR__ . '/modules/start.php';
+        // start মডিউল হ্যান্ডেল হবে
+    } elseif ($text === '🏠 Main Menu' || $text === '/menu') {
+        require_once __DIR__ . '/modules/home.php';
+        $home = new HomeDashboard($db);
+        $home->renderDashboard($chat_id, $user_id);
+    } elseif ($text === '👤 Profile') {
+        require_once __DIR__ . '/modules/profile.php';
+        $profile = new UserProfile($db);
+        $profile->renderProfile($chat_id, $user_id);
+    } elseif ($text === '🔗 Referrals') {
+        require_once __DIR__ . '/modules/refer.php';
+        $ref = new ReferralSystem($db);
+        $ref->renderReferralStats($chat_id, $user_id);
+    } elseif ($text === '📋 Tasks') {
+        require_once __DIR__ . '/modules/tasks.php';
+        $tasks = new TaskManager($db);
+        $tasks->renderTaskList($chat_id, $user_id);
+    } elseif ($text === '💳 Withdraw') {
+        require_once __DIR__ . '/modules/withdraw.php';
+        $wd = new WithdrawSystem($db);
+        $wd->renderMethods($chat_id, $user_id);
+    } elseif (isAdmin($user_id) && str_starts_with($text, '/admin')) {
+        require_once __DIR__ . '/modules/admin.php';
+        $admin = new AdminPanel($db);
+        $admin->handleAdminCommand($chat_id, $text);
+    } else {
+        // গিফট কোড বা অন্য টেক্সট ইনপুট
+        require_once __DIR__ . '/modules/giftcode.php';
+        $gift = new GiftCodeSystem($db);
+        if ($gift->redeemCode($chat_id, $user_id, $text)) {
+            exit;
+        }
+        
+        // ডিফল্ট হোম মেনু
+        require_once __DIR__ . '/modules/home.php';
+        $home = new HomeDashboard($db);
+        $home->renderDashboard($chat_id, $user_id);
+    }
 }
 
-/**
- * টেলিগ্রামে মেসেজ পাঠানোর ফাংশন
- */
-function sendTelegramMessage($chat_id, $text) {
-    $url = "https://api.telegram.org/bot" . BOT_TOKEN . "/sendMessage";
-    $data = [
-        'chat_id' => $chat_id,
-        'text' => $text,
-        'parse_mode' => 'HTML'
-    ];
+// ইনলাইন বাটন ক্লিক (Callback Query) রাউটিং
+if (isset($update['callback_query'])) {
+    $callback = $update['callback_query'];
+    $callback_id = $callback['id'];
+    $chat_id = $callback['message']['chat']['id'];
+    $message_id = $callback['message']['message_id'];
+    $user_id = $callback['from']['id'];
+    $data = $callback['data'];
 
-    $options = [
-        'http' => [
-            'header'  => "Content-type: application/x-www-form-urlencoded\r\n",
-            'method'  => 'POST',
-            'content' => http_build_query($data)
-        ]
-    ];
+    $db = Database::getConnection();
 
-    $context  = stream_context_create($options);
-    @file_get_contents($url, false, $context);
+    if ($data === 'menu_home') {
+        answerCallbackQuery($callback_id);
+        require_once __DIR__ . '/modules/home.php';
+        $home = new HomeDashboard($db);
+        $home->renderDashboard($chat_id, $user_id);
+    } elseif ($data === 'profile') {
+        answerCallbackQuery($callback_id);
+        require_once __DIR__ . '/modules/profile.php';
+        $profile = new UserProfile($db);
+        $profile->renderProfile($chat_id, $user_id);
+    } elseif ($data === 'referral') {
+        answerCallbackQuery($callback_id);
+        require_once __DIR__ . '/modules/refer.php';
+        $ref = new ReferralSystem($db);
+        $ref->renderReferralStats($chat_id, $user_id);
+    } elseif ($data === 'tasks') {
+        answerCallbackQuery($callback_id);
+        require_once __DIR__ . '/modules/tasks.php';
+        $tasks = new TaskManager($db);
+        $tasks->renderTaskList($chat_id, $user_id);
+    } elseif (str_starts_with($data, 'view_task_')) {
+        $task_id = (int)str_replace('view_task_', '', $data);
+        require_once __DIR__ . '/modules/tasks.php';
+        $tasks = new TaskManager($db);
+        $tasks->renderTaskDetails($callback_id, $chat_id, $message_id, $user_id, $task_id);
+    } elseif (str_starts_with($data, 'claim_task_')) {
+        $task_id = (int)str_replace('claim_task_', '', $data);
+        require_once __DIR__ . '/modules/tasks.php';
+        $tasks = new TaskManager($db);
+        $tasks->claimTaskReward($callback_id, $chat_id, $message_id, $user_id, $task_id);
+    } elseif ($data === 'withdraw') {
+        answerCallbackQuery($callback_id);
+        require_once __DIR__ . '/modules/withdraw.php';
+        $wd = new WithdrawSystem($db);
+        $wd->renderMethods($chat_id, $user_id);
+    } elseif ($data === 'leaderboard') {
+        answerCallbackQuery($callback_id);
+        require_once __DIR__ . '/modules/leaderboard.php';
+        $lb = new LeaderboardSystem($db);
+        $lb->renderLeaderboard($chat_id);
+    }
 }
-?>
