@@ -5,72 +5,128 @@ require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/database.php';
 require_once __DIR__ . '/functions.php';
 
-$content = file_get_contents("php://input");
-$update = json_decode($content, true);
+$rawInput = file_get_contents('php://input');
+$update = json_decode($rawInput, true);
+if (!is_array($update)) { http_response_code(200); exit('OK'); }
 
-if (!$update) {
-    echo "Enterprise Telegram Bot Webhook Active & Running Successfully.";
+$chat = $update['message']['chat'] ?? $update['callback_query']['message']['chat'] ?? null;
+$from = $update['message']['from'] ?? $update['callback_query']['from'] ?? null;
+$text = $update['message']['text'] ?? '';
+$cb_data = $update['callback_query']['data'] ?? '';
+$cb_id = $update['callback_query']['id'] ?? '';
+
+if (!$chat || $chat['type'] !== 'private' || !$from) { http_response_code(200); exit('OK'); }
+
+$uid = (string)$from['id'];
+$isAdmin = ($uid == ADMIN_ID);
+
+$users = db('users');
+$bans = db('bans');
+if (in_array($uid, $bans)) { exit; }
+
+$now = time();
+if (!isset($users[$uid])) {
+    $ref = null;
+    if (str_starts_with($text, '/start ')) {
+        $p = explode(' ', $text)[1];
+        if (isset($users[$p]) && $p != $uid) $ref = $p;
+    }
+    $users[$uid] = ['id'=>$uid, 'name'=>$from['first_name'], 'bal'=>0, 'earned'=>0, 'refs'=>0, 'ref_by'=>$ref, 'join_date'=>$now, 'last_msg'=>$now, 'state'=>'', 'state_data'=>[], 'verified'=>false];
+} else {
+    $users[$uid]['name'] = $from['first_name'];
+}
+
+$user = &$users[$uid];
+$settings = db('settings');
+$cur = $settings['currency'] ?? 'টাকা';
+
+function saveUser() { 
+    global $users; 
+    db('users', $users); 
+}
+
+// মূল মেনু (ইংরেজি ভাষা)
+$main_kb = [
+    'keyboard' => [
+        [['text'=>'🏠 Home'], ['text'=>'👤 Profile']],
+        [['text'=>'💰 Balance'], ['text'=>'👥 Referral']],
+        [['text'=>'📋 Tasks'], ['text'=>'💸 Withdraw']]
+    ],
+    'resize_keyboard' => true
+];
+if ($isAdmin) $main_kb['keyboard'][] = [['text'=>'🛠 Admin Panel']];
+
+// যদি ইউজার ভেরিফাই বাটনে ক্লিক করে
+if ($cb_data === 'verify_join') {
+    $needJoinCheck = false;
+    foreach ($settings['channels'] as $channel) {
+        if (!isJoined($uid, $channel)) {
+            $needJoinCheck = true;
+            break;
+        }
+    }
+
+    if ($needJoinCheck) {
+        ans($cb_id, "❌ Please join all channels first!", true);
+        exit;
+    }
+
+    $user['verified'] = true;
+    ans($cb_id, "✅ Verified Successfully!", true);
+    tg('deleteMessage', ['chat_id' => $uid, 'message_id' => $update['callback_query']['message']['message_id']]);
+    
+    if (!empty($user['ref_by']) && isset($users[$user['ref_by']]) && empty($user['ref_rewarded'])) {
+        $refId = $user['ref_by'];
+        $users[$refId]['refs']++;
+        $users[$refId]['bal'] += $settings['reward'] ?? 10;
+        $users[$refId]['earned'] += $settings['reward'] ?? 10;
+        $user['ref_rewarded'] = true;
+        send($refId, "🎉 New referral joined!\n👤 Name: {$user['name']}");
+    }
+    send($uid, "🎉 Welcome! You are verified.", $main_kb);
+    saveUser();
     exit;
 }
 
-$chat_id = '';
-$user_id = '';
-$text = '';
-$callback_query_id = '';
-
-if (isset($update["message"])) {
-    $chat_id = $update["message"]["chat"]["id"];
-    $user_id = $update["message"]["from"]["id"];
-    $text = $update["message"]["text"] ?? '';
-} elseif (isset($update["callback_query"])) {
-    $chat_id = $update["callback_query"]["message"]["chat"]["id"];
-    $user_id = $update["callback_query"]["from"]["id"];
-    $text = $update["callback_query"]["data"];
-    $callback_query_id = $update["callback_query"]["id"];
-}
-
-if (!empty($text)) {
-    $db = Database::getConnection();
-
-    if ($text === '/start' || str_starts_with($text, '/start ref_')) {
-        if (file_exists(__DIR__ . '/modules/start.php')) {
-            require_once __DIR__ . '/modules/start.php';
-        }
-    } elseif ($text === '🏠 Main Menu' || $text === 'menu_home') {
-        if (file_exists(__DIR__ . '/modules/home.php')) {
-            require_once __DIR__ . '/modules/home.php';
-            $home = new HomeDashboard($db);
-            $home->renderDashboard($chat_id, $user_id);
-        }
-    } elseif ($text === '👤 Profile' || $text === 'profile') {
-        if (file_exists(__DIR__ . '/modules/profile.php')) {
-            require_once __DIR__ . '/modules/profile.php';
-            $profile = new UserProfile($db);
-            $profile->renderProfile($chat_id, $user_id);
-        }
-    } elseif ($text === '🔗 Referrals' || $text === 'referral') {
-        if (file_exists(__DIR__ . '/modules/refer.php')) {
-            require_once __DIR__ . '/modules/refer.php';
-            $refer = new ReferralSystem($db);
-            $refer->renderReferralStats($chat_id, $user_id);
-        }
-    } elseif ($text === '📋 Tasks' || $text === 'tasks') {
-        if (file_exists(__DIR__ . '/modules/tasks.php')) {
-            require_once __DIR__ . '/modules/tasks.php';
-            $tasks = new TaskManager($db);
-            $tasks->renderTaskList($chat_id, $user_id);
-        }
-    } elseif ($text === '💳 Withdraw' || $text === 'withdraw') {
-        if (file_exists(__DIR__ . '/modules/withdraw.php')) {
-            require_once __DIR__ . '/modules/withdraw.php';
-            $withdraw = new WithdrawSystem($db);
-            $withdraw->renderMethods($chat_id, $user_id);
-        }
+// ফোর্স জয়েন চেক
+if (!$isAdmin && empty($user['verified']) && !empty($settings['channels'])) {
+    $needJoin = false;
+    $buttons = [];
+    foreach ($settings['channels'] as $channel) {
+        $buttons[] = [['text' => '📢 Join ' . ltrim($channel, '@'), 'url' => 'https://t.me/' . ltrim($channel, '@')]];
+        if (!isJoined($uid, $channel)) { $needJoin = true; }
+    }
+    if ($needJoin) {
+        $buttons[] = [['text' => '✅ Verify Join', 'callback_data' => 'verify_join']];
+        send($uid, "🚫 <b>Access Denied!</b>\nPlease join our channels and click Verify.", ['inline_keyboard' => $buttons]);
+        saveUser();
+        exit;
     } else {
-        sendMessage($chat_id, "Welcome! Please use the menu below to navigate.");
+        $user['verified'] = true;
     }
 }
 
-if (!empty($callback_query_id)) {
-    answerCallbackQuery($callback_query_id);
+// ==========================================
+// মডিউলার রাউটিং (প্রতিটি ফিচারের জন্য আলাদা ফাইল কল হবে)
+// ==========================================
+if ($text === '/start' || str_starts_with($text, '/start ')) {
+    if (file_exists(__DIR__ . '/modules/start.php')) require_once __DIR__ . '/modules/start.php';
+} elseif ($text === '🏠 Home') {
+    if (file_exists(__DIR__ . '/modules/home.php')) require_once __DIR__ . '/modules/home.php';
+} elseif ($text === '👤 Profile') {
+    if (file_exists(__DIR__ . '/modules/profile.php')) require_once __DIR__ . '/modules/profile.php';
+} elseif ($text === '💰 Balance') {
+    send($uid, "💰 Your Current Balance: <b>{$user['bal']} {$cur}</b>", $main_kb);
+} elseif ($text === '👥 Referral') {
+    $link = "https://t.me/".BOT_USERNAME."?start=".$uid;
+    send($uid, "👥 <b>Referral System</b>\n\nYour Referrals: {$user['refs']}\n🔗 Link:\n<code>{$link}</code>", $main_kb);
+} elseif ($text === '📋 Tasks') {
+    if (file_exists(__DIR__ . '/modules/tasks.php')) require_once __DIR__ . '/modules/tasks.php';
+} elseif ($text === '💸 Withdraw') {
+    if (file_exists(__DIR__ . '/modules/withdraw.php')) require_once __DIR__ . '/modules/withdraw.php';
+} elseif ($isAdmin && $text === '🛠 Admin Panel') {
+    if (file_exists(__DIR__ . '/modules/admin.php')) require_once __DIR__ . '/modules/admin.php';
 }
+
+saveUser();
+http_response_code(200); exit('OK');
